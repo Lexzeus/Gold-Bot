@@ -1,0 +1,16 @@
+.env
+.env.*
+secrets.enc
+*.key
+*.pem
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.git/
+tests/
+docs/
+pine/
+*.md
+.DS_Store

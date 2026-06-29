@@ -1,0 +1,53 @@
+# Render blueprint — deploy the whole bot as ONE web service.
+# In Render: New → Blueprint → connect this repo. Render reads this file,
+# builds the Dockerfile, and prompts you to fill in the `sync: false` secrets
+# (so they never live in the repo). TradingView then points at:
+#     https://<your-service>.onrender.com/tv
+services:
+  - type: web
+    name: gold-bot
+    runtime: docker
+    plan: starter           # ~$7/mo, always-on (free tier sleeps and misses alerts)
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # Bind to Render's injected $PORT and serve the single-service app (/tv + /webhook).
+    dockerCommand: sh -c "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # --- secrets: you enter these in the Render dashboard, never in the repo ---
+      - key: WEBHOOK_SIGNING_SECRET
+        sync: false
+      - key: WEBHOOK_SHARED_TOKEN
+        sync: false
+      - key: DISCORD_WEBHOOK_URL
+        sync: false
+      - key: DISCORD_NEWS_WEBHOOK_URL
+        sync: false
+      # --- non-secret strategy config (safe defaults, edit anytime) ---
+      - key: NEWS_PROVIDER
+        value: forexfactory
+      - key: NEWS_BLACKOUT_MINUTES_BEFORE
+        value: "30"
+      - key: NEWS_BLACKOUT_MINUTES_AFTER
+        value: "30"
+      - key: NEWS_FAIL_CLOSED
+        value: "false"
+      - key: NY_SESSION_ONLY
+        value: "true"
+      - key: NY_SESSION_START
+        value: "08:00"
+      - key: NY_SESSION_END
+        value: "12:00"
+      - key: TIMEZONE
+        value: America/New_York
+      - key: SYMBOL
+        value: XAUUSD
+      - key: HTF_LOOKBACK_BARS
+        value: "500"
+      - key: HTF_REQUIRED_AGREEMENT
+        value: "3"
+      - key: MAX_SPREAD_USD
+        value: "0.50"
+      - key: WEBHOOK_MAX_AGE_SECONDS
+        value: "120"

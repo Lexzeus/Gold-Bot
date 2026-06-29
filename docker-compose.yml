@@ -1,0 +1,32 @@
+# One-command run:  docker compose up --build
+#
+# Only the signing proxy (port 8080) is published. Point your TradingView alert
+# webhook at  https://your-host:8080/tv  (put TLS in front via your reverse proxy).
+# The backend stays on the internal docker network — not exposed publicly.
+services:
+  backend:
+    build: .
+    env_file: .env
+    # secrets.enc + ENV_MASTER_KEY also work; mount secrets.enc if used:
+    # volumes: ["./secrets.enc:/srv/secrets.enc:ro"]
+    expose:
+      - "8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8000/health'); sys.exit(0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  proxy:
+    build: .
+    env_file: .env
+    environment:
+      BACKEND_WEBHOOK_URL: http://backend:8000/webhook
+    ports:
+      - "8080:8080"   # public entry point for TradingView
+    command: uvicorn app.signing_proxy:proxy --host 0.0.0.0 --port 8080
+    depends_on:
+      - backend
+    restart: unless-stopped

@@ -1,0 +1,99 @@
+//@version=5
+// =============================================================================
+// XAU/USD Multi-Timeframe Swing Alert  —  emits the backend's JSON contract
+// -----------------------------------------------------------------------------
+// Detects an execution-TF ChoCh/BOS confirmed by a CANDLE BODY CLOSE (not a wick
+// sweep), reads higher-timeframe trend bias, maps 500-bar HTF supply/demand, and
+// fires a webhook alert whose message matches app/schemas.py:AlertPayload.
+//
+// SECURITY: paste your in-body HMAC `sig` is computed off-chart. TradingView
+// cannot HMAC, so either (A) run a signing proxy, or (B) set a long static
+// WEBHOOK_SHARED_TOKEN here and rely on token + TLS + replay window. The backend
+// accepts a valid header HMAC OR in-body sig; for pure-Pine use, set the token.
+// Do NOT hardcode real secrets in a shared/published script.
+// =============================================================================
+strategy("XAUUSD MTF Swing Alert", overlay=true, calc_on_every_tick=false)
+
+// ---- inputs ----------------------------------------------------------------
+htfLookback   = input.int(500, "HTF S/D lookback bars", minval=50)
+swingLen      = input.int(10,  "Swing pivot length", minval=2)
+sharedToken   = input.string("replace_me_optional_token", "Webhook shared token")
+tp1R          = input.float(1.0, "TP1 (R multiple)")
+tp2R          = input.float(2.0, "TP2 (R multiple)")
+tp3R          = input.float(3.0, "TP3 (R multiple)")
+slBufferUsd   = input.float(0.50, "SL buffer beyond structure (USD)")
+
+// Only run on Gold and on execution timeframes.
+isGold = str.contains(syminfo.ticker, "XAU")
+
+// ---- higher-timeframe trend bias (EMA50 slope direction) -------------------
+f_bias(tf) =>
+    e = request.security(syminfo.tickerid, tf, ta.ema(close, 50))
+    ePrev = request.security(syminfo.tickerid, tf, ta.ema(close, 50)[1])
+    e > ePrev ? "BUY" : "SELL"
+
+bias30 = f_bias("30")
+bias1h = f_bias("60")
+bias4h = f_bias("240")
+bias1d = f_bias("D")
+
+// ---- swing structure + BOS via BODY close ----------------------------------
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+lastSwingHigh := not na(ph) ? ph : lastSwingHigh
+lastSwingLow  := not na(pl) ? pl : lastSwingLow
+
+// /STEELMAN: require the BODY (close), not the wick, to break structure.
+bodyTop    = math.max(open, close)
+bodyBottom = math.min(open, close)
+bosUp   = not na(lastSwingHigh) and bodyTop    > lastSwingHigh and close > lastSwingHigh
+bosDown = not na(lastSwingLow)  and bodyBottom < lastSwingLow  and close < lastSwingLow
+
+// ---- 500-bar HTF supply/demand extremes (context) --------------------------
+hiZone = ta.highest(high, math.min(htfLookback, bar_index + 1))
+loZone = ta.lowest(low,  math.min(htfLookback, bar_index + 1))
+
+// ---- entry / SL / TP geometry ----------------------------------------------
+longEntry  = close
+longSL     = (na(lastSwingLow) ? low : lastSwingLow) - slBufferUsd
+longRisk   = longEntry - longSL
+shortEntry = close
+shortSL    = (na(lastSwingHigh) ? high : lastSwingHigh) + slBufferUsd
+shortRisk  = shortSL - shortEntry
+
+// ---- JSON builder (matches AlertPayload) -----------------------------------
+f_json(dir, pattern, entry, sl, tp1, tp2, tp3) =>
+    '{' +
+      '"symbol":"XAUUSD",' +
+      '"token":"' + sharedToken + '",' +
+      '"timestamp":' + str.tostring(timenow / 1000) + ',' +
+      '"timeframe":"' + timeframe.period + '",' +
+      '"direction":"' + dir + '",' +
+      '"pattern":"' + pattern + '",' +
+      '"entry":' + str.tostring(entry) + ',' +
+      '"stop_loss":' + str.tostring(sl) + ',' +
+      '"take_profits":[' + str.tostring(tp1) + ',' + str.tostring(tp2) + ',' + str.tostring(tp3) + '],' +
+      '"htf_bias":{"tf_30m":"' + bias30 + '","tf_1h":"' + bias1h + '","tf_4h":"' + bias4h + '","tf_1d":"' + bias1d + '"},' +
+      '"bos_body_close":true' +
+    '}'
+
+longMsg  = f_json("BUY",  "ChoCh/BOS body-close + demand retest", longEntry, longSL, longEntry + longRisk*tp1R, longEntry + longRisk*tp2R, longEntry + longRisk*tp3R)
+shortMsg = f_json("SELL", "ChoCh/BOS body-close + supply retest", shortEntry, shortSL, shortEntry - shortRisk*tp1R, shortEntry - shortRisk*tp2R, shortEntry - shortRisk*tp3R)
+
+longSignal  = isGold and bosUp   and bias1h == "BUY"  and bias4h == "BUY"
+shortSignal = isGold and bosDown and bias1h == "SELL" and bias4h == "SELL"
+
+// alert() lets the message ship to the webhook on bar close.
+if longSignal
+    alert(longMsg, alert.freq_once_per_bar_close)
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.green, textcolor=color.white)
+
+if shortSignal
+    alert(shortMsg, alert.freq_once_per_bar_close)
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=color.red, textcolor=color.white)
+
+// plot context zones
+plot(hiZone, "HTF Supply", color=color.new(color.red, 60))
+plot(loZone, "HTF Demand", color=color.new(color.green, 60))
