@@ -74,20 +74,14 @@ shortSL    = (na(lastSwingHigh) ? high : lastSwingHigh) + slBufferUsd
 shortRisk  = shortSL - shortEntry
 
 // ---- JSON builder (matches AlertPayload) -----------------------------------
+// Built in single-line chunks: Pine's line-wrapping rules are fragile when
+// pasted into the editor, so no expression spans more than one line.
 f_json(dir, pattern, entry, sl, tp1, tp2, tp3) =>
-    '{' +
-      '"symbol":"XAUUSD",' +
-      '"token":"' + sharedToken + '",' +
-      '"timestamp":' + str.tostring(math.round(timenow / 1000)) + ',' +
-      '"timeframe":"' + timeframe.period + '",' +
-      '"direction":"' + dir + '",' +
-      '"pattern":"' + pattern + '",' +
-      '"entry":' + str.tostring(entry) + ',' +
-      '"stop_loss":' + str.tostring(sl) + ',' +
-      '"take_profits":[' + str.tostring(tp1) + ',' + str.tostring(tp2) + ',' + str.tostring(tp3) + '],' +
-      '"htf_bias":{"tf_30m":"' + bias30 + '","tf_1h":"' + bias1h + '","tf_4h":"' + bias4h + '","tf_1d":"' + bias1d + '"},' +
-      '"bos_body_close":true' +
-    '}'
+    p1 = '{"symbol":"XAUUSD","token":"' + sharedToken + '","timestamp":' + str.tostring(math.round(timenow / 1000)) + ',"timeframe":"' + timeframe.period + '",'
+    p2 = '"direction":"' + dir + '","pattern":"' + pattern + '","entry":' + str.tostring(entry) + ',"stop_loss":' + str.tostring(sl) + ','
+    p3 = '"take_profits":[' + str.tostring(tp1) + ',' + str.tostring(tp2) + ',' + str.tostring(tp3) + '],'
+    p4 = '"htf_bias":{"tf_30m":"' + bias30 + '","tf_1h":"' + bias1h + '","tf_4h":"' + bias4h + '","tf_1d":"' + bias1d + '"},"bos_body_close":true}'
+    p1 + p2 + p3 + p4
 
 longMsg  = f_json("BUY",  "ChoCh/BOS body-close + demand retest", longEntry, longSL, longEntry + longRisk*tp1R, longEntry + longRisk*tp2R, longEntry + longRisk*tp3R)
 shortMsg = f_json("SELL", "ChoCh/BOS body-close + supply retest", shortEntry, shortSL, shortEntry - shortRisk*tp1R, shortEntry - shortRisk*tp2R, shortEntry - shortRisk*tp3R)
