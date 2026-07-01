@@ -14,6 +14,7 @@ Path B works with raw TradingView alerts and is what the Pine template uses.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -37,9 +38,24 @@ if not cfg.webhook_shared_token or "replace_me" in (cfg.webhook_shared_token or 
     )
 
 
+@app.on_event("startup")
+async def _start_scanner() -> None:
+    """Launch the built-in market scanner (TradingView not required)."""
+    if cfg.scanner_enabled:
+        from .scanner import run_scanner
+
+        asyncio.create_task(run_scanner(cfg, cfg.scanner_poll_seconds))
+        log.info("Built-in scanner enabled — TradingView webhook not required.")
+
+
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "symbol": cfg.symbol, "ny_session_only": cfg.ny_session_only}
+    return {
+        "status": "ok",
+        "symbol": cfg.symbol,
+        "ny_session_only": cfg.ny_session_only,
+        "scanner_enabled": cfg.scanner_enabled,
+    }
 
 
 async def _process(raw: bytes, x_signature: str | None) -> dict:
@@ -123,6 +139,22 @@ async def _process(raw: bytes, x_signature: str | None) -> dict:
         "rr_targets": result.rr_targets,
         "news": news.note,
     }
+
+
+@app.get("/scan")
+async def manual_scan(token: str | None = None) -> dict:
+    """Debug: run one scanner cycle now. Requires the shared token."""
+    from .schemas import AlertPayload as _AP  # noqa: F401 (keep import graph warm)
+    from .scanner import ScannerState, scan_once
+
+    if cfg.webhook_shared_token and token != cfg.webhook_shared_token:
+        raise HTTPException(status_code=401, detail="Invalid token.")
+    try:
+        # Fresh state: ignores the latch so you can always see current market read.
+        out = await scan_once(cfg, state=ScannerState())
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+    return out or {"status": "no_signal", "note": "No fresh structural break on the last closed 5m bar."}
 
 
 @app.post("/webhook")

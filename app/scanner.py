@@ -1,0 +1,279 @@
+"""
+Built-in market scanner — replaces the TradingView/Pine side entirely.
+
+Every SCANNER_POLL_SECONDS (default 300 = one 5m bar) it:
+  1. Pulls 5m gold candles (Yahoo Finance GC=F, keyless) and 1D candles.
+  2. Resamples 5m -> 30m / 1h / 4h locally.
+  3. Computes EMA50-slope bias per higher timeframe (same rule as the Pine script).
+  4. Detects swing pivots (length 10) and a Break of Structure confirmed by a
+     candle BODY close past the swing level — latched one alert per break,
+     exactly like the Pine version.
+  5. Rebases futures prices to spot using Swissquote's public XAU/USD quote
+     (also yields a real bid/ask spread for the spread gate). Best-effort.
+  6. Feeds the signal through the SAME gate stack (pipeline.validate) and
+     relays to Discord on pass.
+
+Data notes:
+  - GC=F is the gold futures front month; its *shape* (structure, EMAs) tracks
+    spot closely. Absolute prices differ by the basis, hence the spot rebase.
+  - If Swissquote is unreachable we send futures-referenced prices and no
+    spread; the 5m spread gate passes on missing spread by design.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from dataclasses import dataclass
+from datetime import datetime
+
+import httpx
+import pytz
+
+from .config import Settings
+from .pipeline import validate
+from .relay import build_embed, build_news_notice, send_discord
+from .schemas import AlertPayload, Direction, HTFBias
+
+log = logging.getLogger("gold-scanner")
+
+SWING_LEN = 10
+SL_BUFFER_USD = 0.50
+TP_R = (1.0, 2.0, 3.0)
+
+YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+SWISSQUOTE_URL = (
+    "https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD"
+)
+UA = {"User-Agent": "Mozilla/5.0 (gold-bot scanner)"}
+
+
+@dataclass
+class Candle:
+    ts: int  # bar open, epoch seconds UTC
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+# ---------------------------------------------------------------- data fetch
+async def fetch_candles(interval: str, range_: str) -> list[Candle]:
+    params = {"interval": interval, "range": range_, "includePrePost": "false"}
+    async with httpx.AsyncClient(timeout=15.0, headers=UA) as client:
+        r = await client.get(YAHOO_URL, params=params)
+        r.raise_for_status()
+        data = r.json()
+    result = data["chart"]["result"][0]
+    ts = result["timestamp"]
+    q = result["indicators"]["quote"][0]
+    candles = []
+    for i, t in enumerate(ts):
+        o, h, l, c = q["open"][i], q["high"][i], q["low"][i], q["close"][i]
+        if None in (o, h, l, c):
+            continue
+        candles.append(Candle(int(t), float(o), float(h), float(l), float(c)))
+    return candles
+
+
+async def fetch_spot() -> tuple[float | None, float | None]:
+    """Return (spot_mid, spread_usd) from Swissquote, or (None, None)."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0, headers=UA) as client:
+            r = await client.get(SWISSQUOTE_URL)
+            r.raise_for_status()
+            rows = r.json()
+        best_bid, best_ask = None, None
+        for row in rows:
+            for prof in row.get("spreadProfilePrices", []):
+                bid, ask = prof.get("bid"), prof.get("ask")
+                if bid and ask and (best_bid is None or ask - bid < best_ask - best_bid):
+                    best_bid, best_ask = float(bid), float(ask)
+        if best_bid is None:
+            return None, None
+        return (best_bid + best_ask) / 2, round(best_ask - best_bid, 2)
+    except Exception as exc:
+        log.warning("Spot fetch failed (%s); using futures prices, no spread.", exc)
+        return None, None
+
+
+# ---------------------------------------------------------------- indicators
+def resample(c5: list[Candle], minutes: int) -> list[Candle]:
+    """Aggregate 5m candles into fixed `minutes` buckets (UTC-aligned)."""
+    out: list[Candle] = []
+    bucket = minutes * 60
+    cur: Candle | None = None
+    cur_key = None
+    for c in c5:
+        key = c.ts - (c.ts % bucket)
+        if key != cur_key:
+            if cur is not None:
+                out.append(cur)
+            cur = Candle(key, c.open, c.high, c.low, c.close)
+            cur_key = key
+        else:
+            cur.high = max(cur.high, c.high)
+            cur.low = min(cur.low, c.low)
+            cur.close = c.close
+    if cur is not None:
+        out.append(cur)
+    return out
+
+
+def ema(values: list[float], length: int) -> list[float]:
+    if not values:
+        return []
+    k = 2 / (length + 1)
+    out = [values[0]]
+    for v in values[1:]:
+        out.append(v * k + out[-1] * (1 - k))
+    return out
+
+
+def ema_bias(candles: list[Candle], length: int = 50) -> Direction | None:
+    """BUY if EMA rising (now > prev), SELL if falling — same as Pine f_bias."""
+    closes = [c.close for c in candles]
+    if len(closes) < length + 2:
+        return None
+    e = ema(closes, length)
+    return Direction.BUY if e[-1] > e[-2] else Direction.SELL
+
+
+def find_pivots(candles: list[Candle], n: int = SWING_LEN) -> tuple[float | None, float | None]:
+    """Most recent confirmed swing high/low (n bars either side), Pine-style.
+
+    Pine's ta.pivothigh/low requires the pivot to be STRICTLY beyond its
+    neighbors — a flat plateau is not a pivot.
+    """
+    last_high = last_low = None
+    for i in range(n, len(candles) - n):
+        neighbors = candles[i - n : i] + candles[i + 1 : i + n + 1]
+        if all(candles[i].high > c.high for c in neighbors):
+            last_high = candles[i].high
+        if all(candles[i].low < c.low for c in neighbors):
+            last_low = candles[i].low
+    return last_high, last_low
+
+
+# ---------------------------------------------------------------- state
+class ScannerState:
+    """Latch: one alert per structural break (mirrors Pine longFired/shortFired)."""
+
+    def __init__(self) -> None:
+        self.long_fired_at: float | None = None   # swing level already alerted
+        self.short_fired_at: float | None = None
+        self.last_bar_ts: int | None = None
+
+
+STATE = ScannerState()
+
+
+# ---------------------------------------------------------------- one cycle
+async def scan_once(cfg: Settings, state: ScannerState = STATE) -> dict | None:
+    c5 = await fetch_candles("5m", "7d")
+    if len(c5) < SWING_LEN * 2 + 2:
+        log.info("Not enough 5m candles yet (%d).", len(c5))
+        return None
+
+    # Work on CLOSED bars only: drop the still-forming last candle.
+    c5 = c5[:-1]
+    bar = c5[-1]
+    if state.last_bar_ts == bar.ts:
+        return None  # nothing new since last cycle
+    state.last_bar_ts = bar.ts
+
+    # HTF bias (30m/1h/4h resampled from 5m; 1D fetched directly)
+    bias = HTFBias(
+        tf_30m=ema_bias(resample(c5, 30)),
+        tf_1h=ema_bias(resample(c5, 60)),
+        tf_4h=ema_bias(resample(c5, 240)),
+        tf_1d=ema_bias(await fetch_candles("1d", "1y")),
+    )
+
+    # Swing structure from bars BEFORE the current one (pivot can't include it)
+    swing_high, swing_low = find_pivots(c5[:-1])
+    body_top = max(bar.open, bar.close)
+    body_bottom = min(bar.open, bar.close)
+
+    bos_up = swing_high is not None and body_top > swing_high and bar.close > swing_high
+    bos_down = swing_low is not None and body_bottom < swing_low and bar.close < swing_low
+
+    direction: Direction | None = None
+    if bos_up and state.long_fired_at != swing_high:
+        direction = Direction.BUY
+        state.long_fired_at = swing_high
+    elif bos_down and state.short_fired_at != swing_low:
+        direction = Direction.SELL
+        state.short_fired_at = swing_low
+
+    if direction is None:
+        return None
+
+    # Price geometry (rebase futures -> spot when possible)
+    spot_mid, spread = await fetch_spot()
+    offset = (spot_mid - bar.close) if spot_mid is not None else 0.0
+    entry = round(bar.close + offset, 2)
+    if direction is Direction.BUY:
+        sl = round((swing_low if swing_low is not None else bar.low) + offset - SL_BUFFER_USD, 2)
+        risk = entry - sl
+        tps = [round(entry + risk * r, 2) for r in TP_R]
+    else:
+        sl = round((swing_high if swing_high is not None else bar.high) + offset + SL_BUFFER_USD, 2)
+        risk = sl - entry
+        tps = [round(entry - risk * r, 2) for r in TP_R]
+    if risk <= 0:
+        log.info("Degenerate risk geometry; skipping.")
+        return None
+
+    payload = AlertPayload(
+        symbol="XAUUSD",
+        token=cfg.webhook_shared_token,
+        timestamp=time.time(),
+        timeframe="5m",
+        direction=direction,
+        pattern="BOS body-close (built-in scanner)",
+        entry=entry,
+        stop_loss=sl,
+        take_profits=tps,
+        htf_bias=bias,
+        spread=spread,
+        bos_body_close=True,
+    )
+
+    result, news, local_time = await validate(payload, cfg)
+    if not result.passed:
+        log.info("Scanner signal SUPPRESSED %s: %s", direction.value, result.rejections)
+        if news.blocked and cfg.discord_news_webhook_url:
+            try:
+                await send_discord(
+                    cfg.discord_news_webhook_url,
+                    build_news_notice(payload, news, "suppressed"),
+                )
+            except Exception as exc:
+                log.error("News notice failed: %s", exc)
+        return {"status": "suppressed", "rejections": result.rejections}
+
+    await send_discord(cfg.discord_webhook_url, build_embed(payload, result, news, local_time))
+    if news.flagged and not news.blocked and cfg.discord_news_webhook_url:
+        try:
+            await send_discord(
+                cfg.discord_news_webhook_url, build_news_notice(payload, news, "heads_up")
+            )
+        except Exception as exc:
+            log.error("News heads-up failed: %s", exc)
+    log.info("Scanner RELAYED %s entry=%.2f sl=%.2f", direction.value, entry, sl)
+    return {"status": "relayed", "direction": direction.value, "entry": entry}
+
+
+# ---------------------------------------------------------------- loop
+async def run_scanner(cfg: Settings, poll_seconds: int) -> None:
+    log.info("Built-in scanner started (poll every %ds).", poll_seconds)
+    while True:
+        try:
+            # Skip weekends entirely (gold closed); saves API calls.
+            now_et = datetime.now(pytz.timezone("America/New_York"))
+            if now_et.weekday() < 5 or (now_et.weekday() == 6 and now_et.hour >= 18):
+                await scan_once(cfg)
+        except Exception as exc:
+            log.error("Scanner cycle failed: %s", exc)
+        await asyncio.sleep(poll_seconds)

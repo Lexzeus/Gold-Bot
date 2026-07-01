@@ -110,7 +110,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000          # backend
 uvicorn app.signing_proxy:proxy --host 0.0.0.0 --port 8080  # proxy
 ```
 
-## TradingView side
+## Built-in scanner (no TradingView needed)
+
+Set `SCANNER_ENABLED=true` and the bot detects signals itself: it polls free
+gold market data (Yahoo GC=F candles, rebased to spot via Swissquote's public
+XAU/USD quote) every 5 minutes, runs the same EMA50 HTF bias + swing-pivot BOS
+body-close logic as the Pine script, and pushes qualifying signals through the
+identical gate stack to Discord. TradingView (and its paid webhook plan) is
+entirely optional. Debug endpoint: `GET /scan?token=<WEBHOOK_SHARED_TOKEN>`
+runs one cycle immediately and reports what it saw.
+
+## TradingView side (optional alternative)
 
 1. Add `pine/gold_swing_alert.pine` to a chart on **XAUUSD** (any execution TF: 1/5/15m).
 2. Create an alert → Condition: the indicator → "Any alert() function call".

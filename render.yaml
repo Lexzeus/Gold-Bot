@@ -51,3 +51,9 @@ services:
         value: "0.50"
       - key: WEBHOOK_MAX_AGE_SECONDS
         value: "120"
+      # Built-in scanner: detects signals from free market data itself,
+      # no TradingView subscription/webhook needed.
+      - key: SCANNER_ENABLED
+        value: "true"
+      - key: SCANNER_POLL_SECONDS
+        value: "300"

@@ -38,6 +38,8 @@ def _cfg(**over) -> Settings:
         ny_session_start="08:00",
         ny_session_end="12:00",
         timezone="America/New_York",
+        scanner_enabled=False,
+        scanner_poll_seconds=300,
     )
     base.update(over)
     return Settings(**base)

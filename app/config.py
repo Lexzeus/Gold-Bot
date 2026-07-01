@@ -83,6 +83,9 @@ class Settings:
     ny_session_start: str
     ny_session_end: str
     timezone: str
+    # built-in scanner (replaces TradingView)
+    scanner_enabled: bool
+    scanner_poll_seconds: int
 
 
 def load_settings(require_secrets: bool = True) -> Settings:
@@ -105,4 +108,6 @@ def load_settings(require_secrets: bool = True) -> Settings:
         ny_session_start=_get("NY_SESSION_START", "08:00") or "08:00",
         ny_session_end=_get("NY_SESSION_END", "12:00") or "12:00",
         timezone=_get("TIMEZONE", "America/New_York") or "America/New_York",
+        scanner_enabled=_bool("SCANNER_ENABLED", False),
+        scanner_poll_seconds=int(_get("SCANNER_POLL_SECONDS", "300")),
     )
