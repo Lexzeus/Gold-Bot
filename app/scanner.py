@@ -41,11 +41,16 @@ SWING_LEN = 10
 SL_BUFFER_USD = 0.50
 TP_R = (1.0, 2.0, 3.0)
 
-YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F"
+YAHOO_HOSTS = ("query1.finance.yahoo.com", "query2.finance.yahoo.com")
+STOOQ_URL = "https://stooq.com/q/d/l/"
 SWISSQUOTE_URL = (
     "https://forex-data-feed.swissquote.com/public-quotes/bboquotes/instrument/XAU/USD"
 )
-UA = {"User-Agent": "Mozilla/5.0 (gold-bot scanner)"}
+UA = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+}
+STOOQ_TZ = pytz.timezone("Europe/Warsaw")  # stooq intraday timestamps are Warsaw time
 
 
 @dataclass
@@ -58,12 +63,26 @@ class Candle:
 
 
 # ---------------------------------------------------------------- data fetch
-async def fetch_candles(interval: str, range_: str) -> list[Candle]:
+# Provider chain: Yahoo (GC=F futures) -> Stooq (spot XAUUSD CSV) -> stale cache.
+# Yahoo rate-limits cloud IPs (429); Stooq is keyless CSV. Cache smooths gaps.
+_CANDLE_CACHE: dict[str, tuple[float, list["Candle"]]] = {}
+_CACHE_MAX_AGE = 1800  # 30 min of staleness tolerated before we give up
+
+
+async def _fetch_yahoo(interval: str, range_: str) -> list[Candle]:
     params = {"interval": interval, "range": range_, "includePrePost": "false"}
+    last_exc: Exception | None = None
     async with httpx.AsyncClient(timeout=15.0, headers=UA) as client:
-        r = await client.get(YAHOO_URL, params=params)
-        r.raise_for_status()
-        data = r.json()
+        for host in YAHOO_HOSTS:
+            try:
+                r = await client.get(f"https://{host}/v8/finance/chart/GC=F", params=params)
+                r.raise_for_status()
+                data = r.json()
+                break
+            except Exception as exc:
+                last_exc = exc
+        else:
+            raise last_exc or RuntimeError("yahoo unreachable")
     result = data["chart"]["result"][0]
     ts = result["timestamp"]
     q = result["indicators"]["quote"][0]
@@ -74,6 +93,60 @@ async def fetch_candles(interval: str, range_: str) -> list[Candle]:
             continue
         candles.append(Candle(int(t), float(o), float(h), float(l), float(c)))
     return candles
+
+
+async def _fetch_stooq(interval: str) -> list[Candle]:
+    """Stooq spot XAUUSD CSV. interval '5m' -> i=5, '1d' -> i=d."""
+    params = {"s": "xauusd", "i": "5" if interval == "5m" else "d"}
+    async with httpx.AsyncClient(timeout=20.0, headers=UA, follow_redirects=True) as client:
+        r = await client.get(STOOQ_URL, params=params)
+        r.raise_for_status()
+        text = r.text
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 3 or not lines[0].lower().startswith("date"):
+        raise RuntimeError(f"stooq returned no data ({lines[:1]})")
+    header = [h.strip().lower() for h in lines[0].split(",")]
+    idx = {name: header.index(name) for name in ("date", "open", "high", "low", "close")}
+    t_idx = header.index("time") if "time" in header else None
+    candles: list[Candle] = []
+    for ln in lines[1:]:
+        cols = ln.split(",")
+        try:
+            if t_idx is not None:
+                naive = datetime.strptime(f"{cols[idx['date']]} {cols[t_idx]}", "%Y-%m-%d %H:%M:%S")
+                ts = int(STOOQ_TZ.localize(naive).timestamp())
+            else:
+                naive = datetime.strptime(cols[idx["date"]], "%Y-%m-%d")
+                ts = int(pytz.utc.localize(naive).timestamp())
+            candles.append(
+                Candle(ts, float(cols[idx["open"]]), float(cols[idx["high"]]),
+                       float(cols[idx["low"]]), float(cols[idx["close"]]))
+            )
+        except Exception:
+            continue
+    if not candles:
+        raise RuntimeError("stooq CSV parsed to zero candles")
+    return candles
+
+
+async def fetch_candles(interval: str, range_: str) -> list[Candle]:
+    key = f"{interval}:{range_}"
+    errors = []
+    for fetcher, name in ((_fetch_yahoo, "yahoo"), (_fetch_stooq, "stooq")):
+        try:
+            candles = (
+                await fetcher(interval, range_) if name == "yahoo" else await fetcher(interval)
+            )
+            if candles:
+                _CANDLE_CACHE[key] = (time.time(), candles)
+                return candles
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+    cached = _CANDLE_CACHE.get(key)
+    if cached and time.time() - cached[0] < _CACHE_MAX_AGE:
+        log.warning("All feeds failed (%s); using cached candles.", "; ".join(errors))
+        return cached[1]
+    raise RuntimeError("All candle feeds failed: " + "; ".join(errors))
 
 
 async def fetch_spot() -> tuple[float | None, float | None]:
