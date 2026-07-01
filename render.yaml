@@ -7,7 +7,8 @@ services:
   - type: web
     name: gold-bot
     runtime: docker
-    plan: starter           # ~$7/mo, always-on (free tier sleeps and misses alerts)
+    plan: free              # test phase; keep awake with an UptimeRobot ping on /health
+                            # (upgrade to `starter` ~$7/mo for guaranteed always-on)
     dockerfilePath: ./Dockerfile
     dockerContext: .
     # Bind to Render's injected $PORT and serve the single-service app (/tv + /webhook).
