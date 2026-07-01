@@ -129,14 +129,50 @@ async def _fetch_stooq(interval: str) -> list[Candle]:
     return candles
 
 
-async def fetch_candles(interval: str, range_: str) -> list[Candle]:
+async def _fetch_twelvedata(interval: str, api_key: str) -> list[Candle]:
+    """Twelve Data spot XAU/USD. Free tier: 800 credits/day (we use ~300)."""
+    td_interval = "5min" if interval == "5m" else "1day"
+    outputsize = 2500 if interval == "5m" else 80
+    params = {
+        "symbol": "XAU/USD",
+        "interval": td_interval,
+        "outputsize": str(outputsize),
+        "timezone": "UTC",
+        "apikey": api_key,
+    }
+    async with httpx.AsyncClient(timeout=20.0, headers=UA) as client:
+        r = await client.get("https://api.twelvedata.com/time_series", params=params)
+        r.raise_for_status()
+        data = r.json()
+    if data.get("status") == "error" or "values" not in data:
+        raise RuntimeError(f"twelvedata: {data.get('message', 'no values')}")
+    candles: list[Candle] = []
+    for row in reversed(data["values"]):  # API is newest-first; we want oldest-first
+        try:
+            naive = datetime.strptime(row["datetime"][:16], "%Y-%m-%d %H:%M")
+            ts = int(pytz.utc.localize(naive).timestamp())
+            candles.append(
+                Candle(ts, float(row["open"]), float(row["high"]),
+                       float(row["low"]), float(row["close"]))
+            )
+        except Exception:
+            continue
+    if not candles:
+        raise RuntimeError("twelvedata parsed to zero candles")
+    return candles
+
+
+async def fetch_candles(interval: str, range_: str, td_api_key: str | None = None) -> list[Candle]:
     key = f"{interval}:{range_}"
     errors = []
-    for fetcher, name in ((_fetch_yahoo, "yahoo"), (_fetch_stooq, "stooq")):
+    fetchers: list[tuple] = []
+    if td_api_key:
+        fetchers.append(("twelvedata", lambda: _fetch_twelvedata(interval, td_api_key)))
+    fetchers.append(("yahoo", lambda: _fetch_yahoo(interval, range_)))
+    fetchers.append(("stooq", lambda: _fetch_stooq(interval)))
+    for name, fetcher in fetchers:
         try:
-            candles = (
-                await fetcher(interval, range_) if name == "yahoo" else await fetcher(interval)
-            )
+            candles = await fetcher()
             if candles:
                 _CANDLE_CACHE[key] = (time.time(), candles)
                 return candles
@@ -243,7 +279,7 @@ STATE = ScannerState()
 
 # ---------------------------------------------------------------- one cycle
 async def scan_once(cfg: Settings, state: ScannerState = STATE) -> dict | None:
-    c5 = await fetch_candles("5m", "7d")
+    c5 = await fetch_candles("5m", "7d", cfg.twelvedata_api_key)
     if len(c5) < SWING_LEN * 2 + 2:
         log.info("Not enough 5m candles yet (%d).", len(c5))
         return None
@@ -260,7 +296,7 @@ async def scan_once(cfg: Settings, state: ScannerState = STATE) -> dict | None:
         tf_30m=ema_bias(resample(c5, 30)),
         tf_1h=ema_bias(resample(c5, 60)),
         tf_4h=ema_bias(resample(c5, 240)),
-        tf_1d=ema_bias(await fetch_candles("1d", "1y")),
+        tf_1d=ema_bias(await fetch_candles("1d", "1y", cfg.twelvedata_api_key)),
     )
 
     # Swing structure from bars BEFORE the current one (pivot can't include it)

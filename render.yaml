@@ -24,6 +24,9 @@ services:
         sync: false
       - key: DISCORD_NEWS_WEBHOOK_URL
         sync: false
+      # Free key from twelvedata.com — primary market-data feed for the scanner.
+      - key: TWELVEDATA_API_KEY
+        sync: false
       # --- non-secret strategy config (safe defaults, edit anytime) ---
       - key: NEWS_PROVIDER
         value: forexfactory

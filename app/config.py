@@ -86,6 +86,7 @@ class Settings:
     # built-in scanner (replaces TradingView)
     scanner_enabled: bool
     scanner_poll_seconds: int
+    twelvedata_api_key: str | None
 
 
 def load_settings(require_secrets: bool = True) -> Settings:
@@ -110,4 +111,5 @@ def load_settings(require_secrets: bool = True) -> Settings:
         timezone=_get("TIMEZONE", "America/New_York") or "America/New_York",
         scanner_enabled=_bool("SCANNER_ENABLED", False),
         scanner_poll_seconds=int(_get("SCANNER_POLL_SECONDS", "300")),
+        twelvedata_api_key=_get("TWELVEDATA_API_KEY") or None,
     )
