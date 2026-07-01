@@ -22,7 +22,9 @@ def compute_signature(secret: str, raw_body: bytes) -> str:
 
 
 def verify_signature(secret: str, raw_body: bytes, provided_sig: str | None) -> bool:
-    if not provided_sig:
+    # Fail closed on a missing/placeholder secret: otherwise an attacker who
+    # guesses the server is unconfigured could forge HMACs with an empty key.
+    if not secret or "replace_me" in secret or not provided_sig:
         return False
     expected = compute_signature(secret, raw_body)
     # constant-time compare to avoid timing attacks

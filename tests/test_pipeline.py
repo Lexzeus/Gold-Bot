@@ -176,6 +176,27 @@ def test_news_fail_open_when_calendar_down(monkeypatch):
     assert news.flagged and not news.blocked
 
 
+def test_timestamp_required():
+    """Replay guard must not be defeatable by omitting the timestamp."""
+    import pytest
+    with pytest.raises(Exception):
+        AlertPayload(symbol="XAUUSD", timeframe="5m", direction=Direction.BUY,
+                     pattern="x", entry=3300.0, stop_loss=3295.0, take_profits=[3305.0])
+
+
+def test_negative_spread_rejected():
+    import pytest
+    with pytest.raises(Exception):
+        _payload(spread=-0.1)
+
+
+def test_empty_or_placeholder_secret_never_verifies():
+    body = b'{"x":1}'
+    assert not verify_signature("", body, compute_signature("", body))
+    ph = "replace_me_with_a_long_random_secret"
+    assert not verify_signature(ph, body, compute_signature(ph, body))
+
+
 def test_news_blackout_blocks(monkeypatch):
     async def fake(*a, **k):
         return news_mod.NewsVerdict(blocked=True, flagged=True, note="BLOCKED: CPI in 5 min.")

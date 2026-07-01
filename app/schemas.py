@@ -7,7 +7,6 @@ The clean JSON contract every TradingView alert must satisfy:
 """
 from __future__ import annotations
 
-import time
 from enum import Enum
 from typing import List, Optional
 
@@ -37,7 +36,9 @@ class AlertPayload(BaseModel):
     symbol: str = Field(..., examples=["XAUUSD"])
     token: Optional[str] = Field(default=None, description="Optional shared token")
     sig: Optional[str] = Field(default=None, description="HMAC of stable fields")
-    timestamp: float = Field(default_factory=lambda: time.time())
+    # REQUIRED: no default. A defaulted timestamp would silently defeat the
+    # replay guard (any payload missing it would always look "fresh").
+    timestamp: float = Field(..., description="Unix seconds when the alert fired")
 
     # --- the trade ---
     timeframe: str = Field(..., examples=["5m"], description="Execution timeframe")
@@ -49,7 +50,7 @@ class AlertPayload(BaseModel):
 
     # --- context for validation ---
     htf_bias: HTFBias = Field(default_factory=HTFBias)
-    spread: Optional[float] = Field(default=None, description="Current spread in USD")
+    spread: Optional[float] = Field(default=None, ge=0, description="Current spread in USD")
     bos_body_close: Optional[bool] = Field(
         default=None,
         description="True if structure break was confirmed by a candle BODY close "

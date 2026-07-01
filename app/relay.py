@@ -3,6 +3,8 @@ Discord relay — pushes the validated, contextualized alert as a rich embed.
 """
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 
 from .news import NewsVerdict
@@ -82,10 +84,22 @@ def build_news_notice(payload: "AlertPayload", news: "NewsVerdict", kind: str) -
     }
 
 
-async def send_discord(webhook_url: str, embed_payload: dict) -> bool:
+async def send_discord(webhook_url: str, embed_payload: dict, max_attempts: int = 3) -> bool:
+    """POST to Discord, retrying on 429 (honoring Retry-After) and transient 5xx."""
     if not webhook_url or "xxxx" in webhook_url:
         raise RuntimeError("DISCORD_WEBHOOK_URL not configured.")
     async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(webhook_url, json=embed_payload)
+        r: httpx.Response | None = None
+        for attempt in range(1, max_attempts + 1):
+            r = await client.post(webhook_url, json=embed_payload)
+            if r.status_code == 429 and attempt < max_attempts:
+                retry_after = float(r.headers.get("Retry-After", "1") or 1)
+                await asyncio.sleep(min(retry_after, 5.0))
+                continue
+            if 500 <= r.status_code < 600 and attempt < max_attempts:
+                await asyncio.sleep(0.5 * attempt)
+                continue
+            break
+        assert r is not None
         r.raise_for_status()
     return True

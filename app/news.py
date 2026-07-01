@@ -157,9 +157,10 @@ async def check_news(
 
     if nearest and nearest_delta is not None and abs(nearest_delta) <= timedelta(hours=2):
         mins = int(nearest_delta.total_seconds() // 60)
+        rel = f"in {mins} min" if mins >= 0 else f"{abs(mins)} min ago"
         return NewsVerdict(
             blocked=False, flagged=True,
-            note=f"Heads-up: '{nearest.title}' in {mins} min (outside blackout).",
+            note=f"Heads-up: '{nearest.title}' {rel} (outside blackout).",
             nearest=nearest,
         )
 

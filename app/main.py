@@ -27,8 +27,14 @@ from .security import compute_signature, is_fresh, verify_signature, verify_toke
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("gold-bot")
 
-app = FastAPI(title="XAU/USD Swing Alert Bot", version="1.0.0")
+app = FastAPI(title="XAU/USD Swing Alert Bot", version="1.1.0")
 cfg = load_settings(require_secrets=False)  # don't crash dev import; checked at use
+
+if not cfg.webhook_shared_token or "replace_me" in (cfg.webhook_shared_token or ""):
+    log.warning(
+        "WEBHOOK_SHARED_TOKEN not set: /tv is protected only by TLS + replay window. "
+        "Set a token (and match it in the Pine input) before exposing /tv publicly."
+    )
 
 
 @app.get("/health")
@@ -38,6 +44,11 @@ async def health() -> dict:
 
 async def _process(raw: bytes, x_signature: str | None) -> dict:
     """Core pipeline shared by /webhook (external sig) and /tv (self-signed)."""
+    # --- refuse to run unconfigured (empty secret would make HMACs forgeable) ---
+    if not cfg.webhook_signing_secret or "replace_me" in cfg.webhook_signing_secret:
+        log.error("WEBHOOK_SIGNING_SECRET missing/placeholder — refusing alert.")
+        raise HTTPException(status_code=503, detail="Server not configured.")
+
     # --- parse ---
     try:
         payload = AlertPayload.model_validate_json(raw)

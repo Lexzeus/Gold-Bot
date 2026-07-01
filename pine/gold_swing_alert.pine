@@ -12,7 +12,7 @@
 // accepts a valid header HMAC OR in-body sig; for pure-Pine use, set the token.
 // Do NOT hardcode real secrets in a shared/published script.
 // =============================================================================
-strategy("XAUUSD MTF Swing Alert", overlay=true, calc_on_every_tick=false)
+indicator("XAUUSD MTF Swing Alert", overlay=true)
 
 // ---- inputs ----------------------------------------------------------------
 htfLookback   = input.int(500, "HTF S/D lookback bars", minval=50)
@@ -24,7 +24,7 @@ tp3R          = input.float(3.0, "TP3 (R multiple)")
 slBufferUsd   = input.float(0.50, "SL buffer beyond structure (USD)")
 
 // Only run on Gold and on execution timeframes.
-isGold = str.contains(syminfo.ticker, "XAU")
+isGold = str.contains(syminfo.ticker, "XAU") or str.contains(syminfo.ticker, "GOLD")
 
 // ---- higher-timeframe trend bias (EMA50 slope direction) -------------------
 f_bias(tf) =>
@@ -51,6 +51,16 @@ bodyBottom = math.min(open, close)
 bosUp   = not na(lastSwingHigh) and bodyTop    > lastSwingHigh and close > lastSwingHigh
 bosDown = not na(lastSwingLow)  and bodyBottom < lastSwingLow  and close < lastSwingLow
 
+// One alert per structural break: once a break fires, latch it until a NEW
+// swing level registers. Without this, bosUp/bosDown stay true on every bar
+// after the break and the webhook gets spammed each bar close.
+var bool longFired  = false
+var bool shortFired = false
+if not na(ph)
+    longFired := false
+if not na(pl)
+    shortFired := false
+
 // ---- 500-bar HTF supply/demand extremes (context) --------------------------
 hiZone = ta.highest(high, math.min(htfLookback, bar_index + 1))
 loZone = ta.lowest(low,  math.min(htfLookback, bar_index + 1))
@@ -68,7 +78,7 @@ f_json(dir, pattern, entry, sl, tp1, tp2, tp3) =>
     '{' +
       '"symbol":"XAUUSD",' +
       '"token":"' + sharedToken + '",' +
-      '"timestamp":' + str.tostring(timenow / 1000) + ',' +
+      '"timestamp":' + str.tostring(math.round(timenow / 1000)) + ',' +
       '"timeframe":"' + timeframe.period + '",' +
       '"direction":"' + dir + '",' +
       '"pattern":"' + pattern + '",' +
@@ -82,15 +92,17 @@ f_json(dir, pattern, entry, sl, tp1, tp2, tp3) =>
 longMsg  = f_json("BUY",  "ChoCh/BOS body-close + demand retest", longEntry, longSL, longEntry + longRisk*tp1R, longEntry + longRisk*tp2R, longEntry + longRisk*tp3R)
 shortMsg = f_json("SELL", "ChoCh/BOS body-close + supply retest", shortEntry, shortSL, shortEntry - shortRisk*tp1R, shortEntry - shortRisk*tp2R, shortEntry - shortRisk*tp3R)
 
-longSignal  = isGold and bosUp   and bias1h == "BUY"  and bias4h == "BUY"
-shortSignal = isGold and bosDown and bias1h == "SELL" and bias4h == "SELL"
+longSignal  = isGold and bosUp   and not longFired  and bias1h == "BUY"  and bias4h == "BUY"
+shortSignal = isGold and bosDown and not shortFired and bias1h == "SELL" and bias4h == "SELL"
 
 // alert() lets the message ship to the webhook on bar close.
 if longSignal
+    longFired := true
     alert(longMsg, alert.freq_once_per_bar_close)
     label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.green, textcolor=color.white)
 
 if shortSignal
+    shortFired := true
     alert(shortMsg, alert.freq_once_per_bar_close)
     label.new(bar_index, high, "SELL", style=label.style_label_down, color=color.red, textcolor=color.white)
 

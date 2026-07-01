@@ -75,6 +75,18 @@ python scripts/encrypt_env.py secrets.json
 rm secrets.json                            # secrets.enc is decrypted at startup
 ```
 
+## Deploy to Render (recommended, single service)
+
+The app serves both `/webhook` and a self-signing `/tv` entry in one process, so
+you can deploy a single web service. `render.yaml` is a ready blueprint:
+
+1. Push this repo to GitHub (`.env` is gitignored and stays local).
+2. In Render: **New → Blueprint** → connect the repo. Render reads `render.yaml`.
+3. Fill in the prompted secrets (`WEBHOOK_SIGNING_SECRET`, `DISCORD_WEBHOOK_URL`,
+   optional `DISCORD_NEWS_WEBHOOK_URL`, `WEBHOOK_SHARED_TOKEN`).
+4. Render gives you `https://<service>.onrender.com`. Point TradingView at
+   `https://<service>.onrender.com/tv`.
+
 ## Deploy (one command, with the signing proxy)
 
 ```bash
@@ -101,7 +113,7 @@ uvicorn app.signing_proxy:proxy --host 0.0.0.0 --port 8080  # proxy
 ## TradingView side
 
 1. Add `pine/gold_swing_alert.pine` to a chart on **XAUUSD** (any execution TF: 1/5/15m).
-2. Create an alert → Condition: the strategy → "Any alert() function call".
+2. Create an alert → Condition: the indicator → "Any alert() function call".
 3. Webhook URL: `https://your-host/tv` (the **proxy**). Leave the message empty —
    the script builds the JSON itself.
 4. Set the `Webhook shared token` input (and `WEBHOOK_SHARED_TOKEN` in env) to match.
