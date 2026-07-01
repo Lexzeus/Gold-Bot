@@ -34,7 +34,7 @@ services:
       - key: NEWS_FAIL_CLOSED
         value: "false"
       - key: NY_SESSION_ONLY
-        value: "false"   # TEMP: demo mode — flip back to "true" before going live
+        value: "true"
       - key: NY_SESSION_START
         value: "08:00"
       - key: NY_SESSION_END
