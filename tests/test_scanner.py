@@ -53,10 +53,11 @@ def test_find_pivots_detects_swing_high_low():
 
 
 def test_bos_latch_one_alert_per_break():
-    """The fired-at latch must block a second alert on the same swing level."""
+    """The fired-at latch must block a second alert on the same swing level, per TF."""
     state = ScannerState()
     swing_high = 110.0
-    # Simulate: first break fires, second bar above same swing must not.
-    assert state.long_fired_at != swing_high
-    state.long_fired_at = swing_high
-    assert state.long_fired_at == swing_high
+    assert state.fired.get(("5m", "long")) != swing_high
+    state.fired[("5m", "long")] = swing_high
+    assert state.fired.get(("5m", "long")) == swing_high
+    # A different trigger TF keeps its own independent latch.
+    assert state.fired.get(("15m", "long")) != swing_high

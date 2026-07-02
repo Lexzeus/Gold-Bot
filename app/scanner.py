@@ -212,6 +212,20 @@ async def fetch_spot() -> tuple[float | None, float | None]:
 
 
 # ---------------------------------------------------------------- indicators
+def resample_closed(c5: list[Candle], minutes: int) -> list[Candle]:
+    """Resample and drop the final bucket if it isn't fully covered yet.
+
+    A 15m 'bar' assembled from only one or two 5m candles hasn't closed —
+    triggering on it would be acting on an unfinished candle.
+    """
+    out = resample(c5, minutes)
+    if out and c5:
+        last_5m_end = c5[-1].ts + 300
+        if out[-1].ts + minutes * 60 > last_5m_end:
+            out = out[:-1]
+    return out
+
+
 def resample(c5: list[Candle], minutes: int) -> list[Candle]:
     """Aggregate 5m candles into fixed `minutes` buckets (UTC-aligned)."""
     out: list[Candle] = []
@@ -270,13 +284,15 @@ def find_pivots(candles: list[Candle], n: int = SWING_LEN) -> tuple[float | None
 
 
 # ---------------------------------------------------------------- state
+TRIGGER_TFS = ("5m", "15m")
+
+
 class ScannerState:
-    """Latch: one alert per structural break (mirrors Pine longFired/shortFired)."""
+    """Latches per trigger TF: one alert per structural break per timeframe."""
 
     def __init__(self) -> None:
-        self.long_fired_at: float | None = None   # swing level already alerted
-        self.short_fired_at: float | None = None
-        self.last_bar_ts: int | None = None
+        self.fired: dict[tuple[str, str], float] = {}   # (tf, side) -> swing level
+        self.last_bar_ts: dict[str, int] = {}           # tf -> last evaluated bar
 
 
 STATE = ScannerState()
@@ -289,14 +305,10 @@ async def scan_once(cfg: Settings, state: ScannerState = STATE) -> dict | None:
         log.info("Not enough 5m candles yet (%d).", len(c5))
         return None
 
-    # Work on CLOSED bars only: drop the still-forming last candle.
+    # Work on CLOSED bars only: drop the still-forming last 5m candle.
     c5 = c5[:-1]
-    bar = c5[-1]
-    if state.last_bar_ts == bar.ts:
-        return None  # nothing new since last cycle
-    state.last_bar_ts = bar.ts
 
-    # HTF bias (30m/1h/4h resampled from 5m; 1D fetched directly)
+    # HTF bias computed once per cycle (30m/1h/4h resampled; 1D fetched)
     bias = HTFBias(
         tf_30m=ema_bias(resample(c5, 30)),
         tf_1h=ema_bias(resample(c5, 60)),
@@ -304,79 +316,93 @@ async def scan_once(cfg: Settings, state: ScannerState = STATE) -> dict | None:
         tf_1d=ema_bias(await fetch_candles("1d", "1y", cfg.twelvedata_api_key)),
     )
 
-    # Swing structure from bars BEFORE the current one (pivot can't include it)
-    swing_high, swing_low = find_pivots(c5[:-1])
-    body_top = max(bar.open, bar.close)
-    body_bottom = min(bar.open, bar.close)
-
-    bos_up = swing_high is not None and body_top > swing_high and bar.close > swing_high
-    bos_down = swing_low is not None and body_bottom < swing_low and bar.close < swing_low
-
-    direction: Direction | None = None
-    if bos_up and state.long_fired_at != swing_high:
-        direction = Direction.BUY
-        state.long_fired_at = swing_high
-    elif bos_down and state.short_fired_at != swing_low:
-        direction = Direction.SELL
-        state.short_fired_at = swing_low
-
-    if direction is None:
-        return None
-
-    # Price geometry (rebase futures -> spot when possible)
     spot_mid, spread = await fetch_spot()
-    offset = (spot_mid - bar.close) if spot_mid is not None else 0.0
-    entry = round(bar.close + offset, 2)
-    if direction is Direction.BUY:
-        sl = round((swing_low if swing_low is not None else bar.low) + offset - SL_BUFFER_USD, 2)
-        risk = entry - sl
-        tps = [round(entry + risk * r, 2) for r in TP_R]
-    else:
-        sl = round((swing_high if swing_high is not None else bar.high) + offset + SL_BUFFER_USD, 2)
-        risk = sl - entry
-        tps = [round(entry - risk * r, 2) for r in TP_R]
-    if risk <= 0:
-        log.info("Degenerate risk geometry; skipping.")
-        return None
+    outcomes: list[dict] = []
 
-    payload = AlertPayload(
-        symbol="XAUUSD",
-        token=cfg.webhook_shared_token,
-        timestamp=time.time(),
-        timeframe="5m",
-        direction=direction,
-        pattern="BOS body-close (built-in scanner)",
-        entry=entry,
-        stop_loss=sl,
-        take_profits=tps,
-        htf_bias=bias,
-        spread=spread,
-        bos_body_close=True,
-    )
+    for tf in TRIGGER_TFS:
+        candles = c5 if tf == "5m" else resample_closed(c5, int(tf.rstrip("m")))
+        if len(candles) < SWING_LEN * 2 + 2:
+            continue
+        bar = candles[-1]
+        if state.last_bar_ts.get(tf) == bar.ts:
+            continue  # this TF has no newly closed bar since last cycle
+        state.last_bar_ts[tf] = bar.ts
 
-    result, news, local_time = await validate(payload, cfg)
-    if not result.passed:
-        log.info("Scanner signal SUPPRESSED %s: %s", direction.value, result.rejections)
-        if news.blocked and cfg.discord_news_webhook_url:
+        # Swing structure from bars BEFORE the trigger bar
+        swing_high, swing_low = find_pivots(candles[:-1])
+        body_top = max(bar.open, bar.close)
+        body_bottom = min(bar.open, bar.close)
+        bos_up = swing_high is not None and body_top > swing_high and bar.close > swing_high
+        bos_down = swing_low is not None and body_bottom < swing_low and bar.close < swing_low
+
+        direction: Direction | None = None
+        if bos_up and state.fired.get((tf, "long")) != swing_high:
+            direction = Direction.BUY
+            state.fired[(tf, "long")] = swing_high
+        elif bos_down and state.fired.get((tf, "short")) != swing_low:
+            direction = Direction.SELL
+            state.fired[(tf, "short")] = swing_low
+        if direction is None:
+            continue
+
+        # Price geometry (rebase futures -> spot when possible)
+        offset = (spot_mid - bar.close) if spot_mid is not None else 0.0
+        entry = round(bar.close + offset, 2)
+        if direction is Direction.BUY:
+            sl = round((swing_low if swing_low is not None else bar.low) + offset - SL_BUFFER_USD, 2)
+            risk = entry - sl
+            tps = [round(entry + risk * r, 2) for r in TP_R]
+        else:
+            sl = round((swing_high if swing_high is not None else bar.high) + offset + SL_BUFFER_USD, 2)
+            risk = sl - entry
+            tps = [round(entry - risk * r, 2) for r in TP_R]
+        if risk <= 0:
+            log.info("[%s] Degenerate risk geometry; skipping.", tf)
+            continue
+
+        payload = AlertPayload(
+            symbol="XAUUSD",
+            token=cfg.webhook_shared_token,
+            timestamp=time.time(),
+            timeframe=tf,
+            direction=direction,
+            pattern=f"BOS body-close on {tf} (built-in scanner)",
+            entry=entry,
+            stop_loss=sl,
+            take_profits=tps,
+            htf_bias=bias,
+            spread=spread,
+            bos_body_close=True,
+        )
+
+        result, news, local_time = await validate(payload, cfg)
+        if not result.passed:
+            log.info("[%s] Scanner signal SUPPRESSED %s: %s", tf, direction.value, result.rejections)
+            if news.blocked and cfg.discord_news_webhook_url:
+                try:
+                    await send_discord(
+                        cfg.discord_news_webhook_url,
+                        build_news_notice(payload, news, "suppressed"),
+                    )
+                except Exception as exc:
+                    log.error("News notice failed: %s", exc)
+            outcomes.append({"tf": tf, "status": "suppressed", "rejections": result.rejections})
+            continue
+
+        await send_discord(cfg.discord_webhook_url, build_embed(payload, result, news, local_time))
+        if news.flagged and not news.blocked and cfg.discord_news_webhook_url:
             try:
                 await send_discord(
-                    cfg.discord_news_webhook_url,
-                    build_news_notice(payload, news, "suppressed"),
+                    cfg.discord_news_webhook_url, build_news_notice(payload, news, "heads_up")
                 )
             except Exception as exc:
-                log.error("News notice failed: %s", exc)
-        return {"status": "suppressed", "rejections": result.rejections}
+                log.error("News heads-up failed: %s", exc)
+        log.info("[%s] Scanner RELAYED %s entry=%.2f sl=%.2f", tf, direction.value, entry, sl)
+        outcomes.append({"tf": tf, "status": "relayed", "direction": direction.value, "entry": entry})
 
-    await send_discord(cfg.discord_webhook_url, build_embed(payload, result, news, local_time))
-    if news.flagged and not news.blocked and cfg.discord_news_webhook_url:
-        try:
-            await send_discord(
-                cfg.discord_news_webhook_url, build_news_notice(payload, news, "heads_up")
-            )
-        except Exception as exc:
-            log.error("News heads-up failed: %s", exc)
-    log.info("Scanner RELAYED %s entry=%.2f sl=%.2f", direction.value, entry, sl)
-    return {"status": "relayed", "direction": direction.value, "entry": entry}
+    if not outcomes:
+        return None
+    return {"status": outcomes[0]["status"] if len(outcomes) == 1 else "multiple", "signals": outcomes}
 
 
 # ---------------------------------------------------------------- loop

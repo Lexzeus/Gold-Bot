@@ -14,6 +14,19 @@ GREEN = 0x2ECC71
 RED = 0xE74C3C
 
 
+def _confluence(payload: AlertPayload) -> str:
+    """Grade the setup by how many HTFs agree with the trigger direction."""
+    b = payload.htf_bias
+    votes = [d for d in (b.tf_30m, b.tf_1h, b.tf_4h, b.tf_1d) if d is not None]
+    if not votes:
+        return "n/a"
+    agree = sum(1 for v in votes if v == payload.direction)
+    grade = f"{agree}/{len(votes)} HTF aligned"
+    if agree == len(votes) >= 4:
+        grade += " ⭐ A-grade (full alignment)"
+    return grade
+
+
 def build_embed(
     payload: AlertPayload, result: ValidationResult, news: NewsVerdict, local_time: str
 ) -> dict:
@@ -31,6 +44,7 @@ def build_embed(
         {"name": "Entry", "value": f"`{payload.entry:.2f}`", "inline": True},
         {"name": "Stop Loss", "value": f"`{payload.stop_loss:.2f}`", "inline": True},
         {"name": "Spread", "value": f"{payload.spread:.2f}" if payload.spread is not None else "n/a", "inline": True},
+        {"name": "Confluence", "value": _confluence(payload), "inline": False},
         {"name": "Take Profits", "value": tps or "—", "inline": False},
         {"name": "HTF Confirmation", "value": "\n".join(f"✓ {r}" for r in result.reasons) or "—", "inline": False},
         {"name": "News", "value": news.note, "inline": False},
