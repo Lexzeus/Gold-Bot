@@ -33,11 +33,16 @@ async def validate(
     # 3: risk geometry
     compute_rr(payload, result)
 
-    # 4: NY session pocket
+    # 4: NY session pocket — intraday triggers only. Swing setups (1h/4h)
+    # complete whenever the higher-TF structure confirms; pros don't skip a
+    # valid 4h break because it printed at 14:30.
+    is_swing = payload.timeframe in {"1h", "4h"}
     inside, local_time = in_ny_session(
         now_utc, cfg.timezone, cfg.ny_session_start, cfg.ny_session_end
     )
-    if cfg.ny_session_only and not inside:
+    if is_swing:
+        result.add_pass(f"Swing timeframe ({payload.timeframe}) — session window waived ({local_time}).")
+    elif cfg.ny_session_only and not inside:
         result.add_reject(
             f"Outside NY session pocket ({cfg.ny_session_start}-{cfg.ny_session_end} "
             f"{cfg.timezone}); now {local_time}."

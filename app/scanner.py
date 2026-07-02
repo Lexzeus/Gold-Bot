@@ -132,7 +132,8 @@ async def _fetch_stooq(interval: str) -> list[Candle]:
 async def _fetch_twelvedata(interval: str, api_key: str) -> list[Candle]:
     """Twelve Data spot XAU/USD. Free tier: 800 credits/day (we use ~300)."""
     td_interval = "5min" if interval == "5m" else "1day"
-    outputsize = 2500 if interval == "5m" else 80
+    # 5000 x 5m bars ≈ 17 trading days — enough 4h bars for swing pivots.
+    outputsize = 5000 if interval == "5m" else 120
     params = {
         "symbol": "XAU/USD",
         "interval": td_interval,
@@ -321,7 +322,9 @@ def find_pivots(candles: list[Candle], n: int = SWING_LEN) -> tuple[float | None
 
 
 # ---------------------------------------------------------------- state
-TRIGGER_TFS = ("5m", "15m")
+INTRADAY_TFS = ("5m", "15m")
+SWING_TRIGGER_TFS = ("1h", "4h")
+TF_MINUTES = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}
 
 
 class ScannerState:
@@ -363,8 +366,9 @@ async def scan_once(cfg: Settings, state: ScannerState = STATE) -> dict | None:
     spot_mid, spread = await fetch_spot()
     outcomes: list[dict] = []
 
-    for tf in TRIGGER_TFS:
-        candles = c5 if tf == "5m" else resample_closed(c5, int(tf.rstrip("m")))
+    trigger_tfs = list(INTRADAY_TFS) + (list(SWING_TRIGGER_TFS) if cfg.swing_mode else [])
+    for tf in trigger_tfs:
+        candles = c5 if tf == "5m" else resample_closed(c5, TF_MINUTES[tf])
         if len(candles) < SWING_LEN * 2 + 2:
             continue
         bar = candles[-1]
@@ -389,15 +393,20 @@ async def scan_once(cfg: Settings, state: ScannerState = STATE) -> dict | None:
         if direction is None:
             continue
 
-        # Price geometry (rebase futures -> spot when possible)
+        # Price geometry (rebase futures -> spot when possible).
+        # SL buffer scales with the trigger TF's own volatility: half an ATR
+        # beyond structure, floored at the fixed minimum. A 4h swing needs a
+        # far wider protective stop than a 5m scalp.
+        tf_atr = atr(candles)
+        buffer = max(SL_BUFFER_USD, 0.5 * tf_atr) if tf_atr else SL_BUFFER_USD
         offset = (spot_mid - bar.close) if spot_mid is not None else 0.0
         entry = round(bar.close + offset, 2)
         if direction is Direction.BUY:
-            sl = round((swing_low if swing_low is not None else bar.low) + offset - SL_BUFFER_USD, 2)
+            sl = round((swing_low if swing_low is not None else bar.low) + offset - buffer, 2)
             risk = entry - sl
             tps = [round(entry + risk * r, 2) for r in TP_R]
         else:
-            sl = round((swing_high if swing_high is not None else bar.high) + offset + SL_BUFFER_USD, 2)
+            sl = round((swing_high if swing_high is not None else bar.high) + offset + buffer, 2)
             risk = sl - entry
             tps = [round(entry - risk * r, 2) for r in TP_R]
         if risk <= 0:
@@ -410,7 +419,11 @@ async def scan_once(cfg: Settings, state: ScannerState = STATE) -> dict | None:
             timestamp=time.time(),
             timeframe=tf,
             direction=direction,
-            pattern=f"BOS body-close on {tf} (built-in scanner)",
+            pattern=(
+                f"SWING BOS body-close on {tf} — multi-day setup"
+                if tf in SWING_TRIGGER_TFS
+                else f"BOS body-close on {tf} (built-in scanner)"
+            ),
             entry=entry,
             stop_loss=sl,
             take_profits=tps,

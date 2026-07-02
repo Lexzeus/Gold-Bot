@@ -31,15 +31,46 @@ def _htf_votes(payload: AlertPayload) -> list[Direction]:
     return [d for d in (b.tf_30m, b.tf_1h, b.tf_4h, b.tf_1d) if d is not None]
 
 
+def _swing_votes(payload: AlertPayload) -> list[Direction]:
+    """For swing triggers, only TFs STRICTLY ABOVE the trigger count as 'higher'."""
+    b = payload.htf_bias
+    if payload.timeframe == "1h":
+        pool = (b.tf_4h, b.tf_1d)
+    else:  # 4h
+        pool = (b.tf_1d,)
+    return [d for d in pool if d is not None]
+
+
 def check_mtf_alignment(
     payload: AlertPayload,
     result: ValidationResult,
     required: int = REQUIRED_HTF_AGREEMENT,
 ) -> None:
-    # Trigger must come from an execution timeframe.
-    if payload.timeframe not in {"1m", "5m", "15m"}:
+    tf = payload.timeframe
+
+    # --- swing triggers (1h/4h): every strictly-higher TF must agree ---
+    if tf in {"1h", "4h"}:
+        votes = _swing_votes(payload)
+        if not votes:
+            result.add_reject(f"No bias above the {tf} swing trigger; cannot confirm trend.")
+            return
+        agree = sum(1 for v in votes if v == payload.direction)
+        if agree < len(votes):
+            result.add_reject(
+                f"Swing trigger on {tf} requires FULL agreement above it; "
+                f"only {agree}/{len(votes)} aligned with {payload.direction.value}."
+            )
+            return
+        result.add_pass(
+            f"Swing trend confirmed: all {agree}/{len(votes)} higher timeframes "
+            f"agree with {payload.direction.value}."
+        )
+        return
+
+    # --- intraday triggers (1m/5m/15m): classic 4-HTF vote ---
+    if tf not in {"1m", "5m", "15m"}:
         result.add_reject(
-            f"Trigger timeframe {payload.timeframe} is not an execution TF (1m/5m/15m)."
+            f"Trigger timeframe {tf} is not a supported trigger TF (1m/5m/15m/1h/4h)."
         )
         return
 

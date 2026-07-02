@@ -20,6 +20,8 @@ class Direction(str, Enum):
 
 # Lower-timeframe execution triggers vs higher-timeframe bias confirmation.
 EXECUTION_TFS = {"1m", "5m", "15m"}
+# Swing triggers: multi-day setups; confirmed only by TFs strictly above them.
+SWING_TFS = {"1h", "4h"}
 HTF_TFS = {"30m", "1h", "4h", "1D"}
 
 

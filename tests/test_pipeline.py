@@ -41,6 +41,7 @@ def _cfg(**over) -> Settings:
         scanner_enabled=False,
         twelvedata_api_key=None,
         volatility_max_atr_mult=3.0,
+        swing_mode=True,
         scanner_poll_seconds=300,
     )
     base.update(over)
@@ -209,3 +210,28 @@ def test_news_blackout_blocks(monkeypatch):
     res, _, _ = asyncio.run(validate(_payload(), _cfg(), now_utc=NOW))
     assert not res.passed
     assert any("CPI" in r for r in res.rejections)
+
+
+# ---------------- swing mode ----------------
+def test_swing_1h_requires_full_higher_agreement(monkeypatch):
+    _no_news(monkeypatch)
+    # 1h trigger: 4h + 1D must BOTH agree. Here 1D disagrees -> reject.
+    bias = HTFBias(tf_30m=Direction.BUY, tf_1h=Direction.BUY,
+                   tf_4h=Direction.BUY, tf_1d=Direction.SELL)
+    res, _, _ = asyncio.run(validate(
+        _payload(timeframe="1h", htf_bias=bias), _cfg(), now_utc=NOW))
+    assert not res.passed
+    assert any("FULL agreement" in r for r in res.rejections)
+
+
+def test_swing_4h_passes_outside_session(monkeypatch):
+    _no_news(monkeypatch)
+    # 4h trigger at 22:00 ET: session gate must be waived; 1D agrees -> pass.
+    night = pytz.utc.localize(datetime(2026, 6, 30, 2, 0))
+    bias = HTFBias(tf_30m=Direction.SELL, tf_1h=Direction.SELL,
+                   tf_4h=Direction.BUY, tf_1d=Direction.BUY)
+    res, _, _ = asyncio.run(validate(
+        _payload(timeframe="4h", htf_bias=bias, timestamp=night.timestamp()),
+        _cfg(), now_utc=night))
+    assert res.passed, res.rejections
+    assert any("session window waived" in r for r in res.reasons)

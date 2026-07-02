@@ -60,3 +60,7 @@ services:
         value: "true"
       - key: SCANNER_POLL_SECONDS
         value: "300"
+      # Swing mode: also hunt 1h/4h multi-day setups (full higher-TF agreement
+      # required, ATR-scaled stops, session window waived).
+      - key: SWING_MODE
+        value: "true"
