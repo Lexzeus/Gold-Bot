@@ -149,7 +149,12 @@ async def _fetch_twelvedata(interval: str, api_key: str) -> list[Candle]:
     candles: list[Candle] = []
     for row in reversed(data["values"]):  # API is newest-first; we want oldest-first
         try:
-            naive = datetime.strptime(row["datetime"][:16], "%Y-%m-%d %H:%M")
+            dt_str = row["datetime"]
+            # Intraday: "2026-07-01 15:30:00" — Daily: just "2026-07-01"
+            if len(dt_str) <= 10:
+                naive = datetime.strptime(dt_str, "%Y-%m-%d")
+            else:
+                naive = datetime.strptime(dt_str[:16], "%Y-%m-%d %H:%M")
             ts = int(pytz.utc.localize(naive).timestamp())
             candles.append(
                 Candle(ts, float(row["open"]), float(row["high"]),
