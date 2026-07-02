@@ -267,6 +267,43 @@ def ema_bias(candles: list[Candle], length: int = 50) -> Direction | None:
     return Direction.BUY if e[-1] > e[-2] else Direction.SELL
 
 
+def atr(candles: list[Candle], length: int = 50) -> float | None:
+    """Average True Range over the last `length` closed bars."""
+    if len(candles) < length + 1:
+        return None
+    trs = []
+    for prev, cur in zip(candles[-length - 1 : -1], candles[-length:]):
+        tr = max(cur.high - cur.low, abs(cur.high - prev.close), abs(cur.low - prev.close))
+        trs.append(tr)
+    return sum(trs) / len(trs)
+
+
+def volatility_shock(candles: list[Candle], mult: float, length: int = 50) -> tuple[bool, str]:
+    """Detect a volatility explosion — the footprint of surprise news.
+
+    Compares the largest true range of the last 3 closed bars against the
+    ATR of the preceding `length` bars. If it exceeds `mult` x ATR, the market
+    is in shock (unscheduled headline, flash move) and signals should pause.
+    """
+    if len(candles) < length + 4:
+        return False, "insufficient history for volatility guard"
+    base = atr(candles[:-3], length)
+    if not base or base <= 0:
+        return False, "no ATR baseline"
+    recent = candles[-3:]
+    worst = 0.0
+    for prev, cur in zip(candles[-4:-1], recent):
+        tr = max(cur.high - cur.low, abs(cur.high - prev.close), abs(cur.low - prev.close))
+        worst = max(worst, tr)
+    ratio = worst / base
+    if ratio >= mult:
+        return True, (
+            f"VOLATILITY SHOCK: last bars ranged {ratio:.1f}x the 50-bar ATR "
+            f"({worst:.2f} vs {base:.2f} USD) — likely unscheduled news/flash move."
+        )
+    return False, f"volatility normal ({ratio:.1f}x ATR)"
+
+
 def find_pivots(candles: list[Candle], n: int = SWING_LEN) -> tuple[float | None, float | None]:
     """Most recent confirmed swing high/low (n bars either side), Pine-style.
 
@@ -315,6 +352,13 @@ async def scan_once(cfg: Settings, state: ScannerState = STATE) -> dict | None:
         tf_4h=ema_bias(resample(c5, 240)),
         tf_1d=ema_bias(await fetch_candles("1d", "1y", cfg.twelvedata_api_key)),
     )
+
+    # Volatility circuit breaker: catches UNSCHEDULED shocks (war headlines,
+    # flash moves) that no economic calendar lists, by their price footprint.
+    shocked, vol_note = volatility_shock(c5, cfg.volatility_max_atr_mult)
+    if shocked:
+        log.warning("Scanner paused: %s", vol_note)
+        return {"status": "suppressed", "rejections": [vol_note]}
 
     spot_mid, spread = await fetch_spot()
     outcomes: list[dict] = []

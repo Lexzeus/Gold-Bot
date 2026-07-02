@@ -40,6 +40,7 @@ def _cfg(**over) -> Settings:
         timezone="America/New_York",
         scanner_enabled=False,
         twelvedata_api_key=None,
+        volatility_max_atr_mult=3.0,
         scanner_poll_seconds=300,
     )
     base.update(over)

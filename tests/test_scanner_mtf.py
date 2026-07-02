@@ -47,3 +47,17 @@ def test_confluence_partial():
 
 def test_confluence_no_votes():
     assert _confluence(_payload(HTFBias())) == "n/a"
+
+
+def test_volatility_shock_detection():
+    from app.scanner import volatility_shock
+    base_ts = 1_750_003_200
+    # 60 calm bars (range ~1.0 USD) then a violent 10 USD bar
+    calm = [_mk(base_ts + i * 300, 100.0, 100.6, 99.6, 100.1) for i in range(60)]
+    shocked, note = volatility_shock(calm, mult=3.0)
+    assert not shocked
+
+    violent = calm + [_mk(base_ts + 61 * 300, 100.0, 110.0, 99.0, 108.0)]
+    shocked, note = volatility_shock(violent, mult=3.0)
+    assert shocked
+    assert "VOLATILITY SHOCK" in note

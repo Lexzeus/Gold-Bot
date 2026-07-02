@@ -87,6 +87,7 @@ class Settings:
     scanner_enabled: bool
     scanner_poll_seconds: int
     twelvedata_api_key: str | None
+    volatility_max_atr_mult: float
 
 
 def load_settings(require_secrets: bool = True) -> Settings:
@@ -112,4 +113,5 @@ def load_settings(require_secrets: bool = True) -> Settings:
         scanner_enabled=_bool("SCANNER_ENABLED", False),
         scanner_poll_seconds=int(_get("SCANNER_POLL_SECONDS", "300")),
         twelvedata_api_key=_get("TWELVEDATA_API_KEY") or None,
+        volatility_max_atr_mult=float(_get("VOLATILITY_MAX_ATR_MULT", "3.0")),
     )
